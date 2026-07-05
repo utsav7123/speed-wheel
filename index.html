@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hero Protocol - Artifact Strike Prototype</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="backdrop"></div>
+  <main class="shell">
+    <section class="banner glass">
+      <div>
+        <p class="eyebrow">Hero Protocol</p>
+        <h1>Artifact Strike</h1>
+        <p class="lede">A browser tactical prototype inspired by the design docs: 5v5 squad fights, agent abilities, buy phase, and a plant/defuse objective.</p>
+      </div>
+      <div class="banner-stats">
+        <div><span>Phase</span><strong id="phaseLabel">Lobby</strong></div>
+        <div><span>Round</span><strong id="roundLabel">1</strong></div>
+        <div><span>Score</span><strong id="scoreLabel">0 - 0</strong></div>
+      </div>
+    </section>
+
+    <section class="layout">
+      <aside class="panel glass left-panel">
+        <div class="panel-header">
+          <h2>Loadout</h2>
+          <button id="startButton" class="primary">Launch Match</button>
+        </div>
+
+        <div class="subsection">
+          <h3>Agent</h3>
+          <div id="agentRoster" class="card-grid"></div>
+        </div>
+
+        <div class="subsection">
+          <h3>Weapon Shop</h3>
+          <div id="weaponShop" class="card-grid"></div>
+        </div>
+
+        <div class="subsection small-copy">
+          <p><strong>Controls</strong></p>
+          <p>Move: WASD · Aim: mouse · Fire: hold left click</p>
+          <p>Ability: Q · Ultimate: R · Plant/Defuse/Interact: E</p>
+          <p>Tip: buy phase lets you switch agent and weapon before the round starts.</p>
+        </div>
+      </aside>
+
+      <section class="arena-wrap glass">
+        <canvas id="arena" width="1104" height="624"></canvas>
+        <div class="hud-strip">
+          <div>
+            <span>Credits</span>
+            <strong id="creditsLabel">800</strong>
+          </div>
+          <div>
+            <span>Timer</span>
+            <strong id="timerLabel">--</strong>
+          </div>
+          <div>
+            <span>Attack Site</span>
+            <strong id="siteLabel">A</strong>
+          </div>
+          <div>
+            <span>Objective</span>
+            <strong id="objectiveLabel">Prepare</strong>
+          </div>
+        </div>
+      </section>
+
+      <aside class="panel glass right-panel">
+        <h2>Match Feed</h2>
+        <div class="feed-stats">
+          <div><span>Allies</span><strong id="allyAlive">5</strong></div>
+          <div><span>Enemies</span><strong id="enemyAlive">5</strong></div>
+          <div><span>Plant</span><strong id="plantLabel">Idle</strong></div>
+        </div>
+        <div id="loadoutSummary" class="loadout-summary"></div>
+        <div id="feedLog" class="feed-log"></div>
+      </aside>
+    </section>
+  </main>
+
+  <div id="overlay" class="overlay show">
+    <div class="overlay-card glass">
+      <p class="eyebrow">Playable Prototype</p>
+      <h2 id="overlayTitle">Artifact Strike</h2>
+      <p id="overlayText">Choose an agent, buy a weapon, and launch the first round. The enemy squad will alternate between attack and defense to simulate the round-based flow from the docs.</p>
+      <button id="overlayButton" class="primary">Enter Match</button>
+    </div>
+  </div>
+
+  <script src="game.js"></script>
+</body>
+</html>
