@@ -167,6 +167,10 @@ const state = {
   fireHeld: false,
   keys: new Set(),
   pointer: { x: MAP_W / 2, y: MAP_H / 2 },
+  cameraAngle: -Math.PI / 2,
+  cameraBob: 0,
+  mouseCaptured: false,
+  crosshairSpread: 0,
   matchFinished: false,
   carryDrop: null,
   overlayLocked: true,
@@ -231,6 +235,139 @@ function clamp(value, min, max) {
 
 function dist(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function angleDiff(a, b) {
+  let diff = a - b;
+  while (diff > Math.PI) diff -= Math.PI * 2;
+  while (diff < -Math.PI) diff += Math.PI * 2;
+  return diff;
+}
+
+function normalizeAngle(angle) {
+  let value = angle;
+  while (value <= -Math.PI) value += Math.PI * 2;
+  while (value > Math.PI) value -= Math.PI * 2;
+  return value;
+}
+
+function vectorFromAngle(angle) {
+  return { x: Math.cos(angle), y: Math.sin(angle) };
+}
+
+function getAimAngle(unit) {
+  if (unit && unit.isPlayer) {
+    return state.cameraAngle;
+  }
+  return Math.atan2(state.pointer.y - unit.y, state.pointer.x - unit.x);
+}
+
+function getCameraPosition() {
+  const unit = state.playerUnit;
+  return unit ? { x: unit.x, y: unit.y } : { x: MAP_W / 2, y: MAP_H / 2 };
+}
+
+function getPlayerCrosshairTarget() {
+  const player = state.playerUnit;
+  if (!player) {
+    return null;
+  }
+
+  let best = null;
+  let bestScore = Infinity;
+  for (const unit of state.units) {
+    if (unit.dead || unit.team === player.team) {
+      continue;
+    }
+    const angle = Math.atan2(unit.y - player.y, unit.x - player.x);
+    const diff = Math.abs(angleDiff(angle, state.cameraAngle));
+    const distance = dist(player, unit);
+    if (diff < 0.12 && distance < bestScore && canSee(player, unit)) {
+      best = unit;
+      bestScore = distance;
+    }
+  }
+  return best;
+}
+
+function projectPoint(point, cameraX, cameraY, cameraAngle, fov, width, height) {
+  const dx = point.x - cameraX;
+  const dy = point.y - cameraY;
+  const distance = Math.hypot(dx, dy);
+  const angle = Math.atan2(dy, dx);
+  const rel = angleDiff(angle, cameraAngle);
+  if (Math.abs(rel) > fov / 2 + 0.45) {
+    return null;
+  }
+  const x = ((rel + fov / 2) / fov) * width;
+  const scale = Math.max(0.18, Math.cos(rel));
+  const size = (TILE * 220 * scale) / Math.max(24, distance);
+  return { x, y: height / 2, size, distance, rel };
+}
+
+function drawWeaponOverlay() {
+  const gunW = canvas.width * 0.22;
+  const gunH = canvas.height * 0.18;
+  const x = canvas.width - gunW - 34;
+  const y = canvas.height - gunH - 24;
+  ctx.save();
+  ctx.globalAlpha = 0.95;
+  ctx.fillStyle = 'rgba(10, 18, 30, 0.92)';
+  ctx.fillRect(x + 20, y + 24, gunW - 40, gunH - 20);
+  ctx.fillStyle = 'rgba(75, 228, 255, 0.7)';
+  ctx.fillRect(x + 36, y + 40, gunW * 0.45, 14);
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  ctx.fillRect(x + 18, y + 48, gunW * 0.18, 10);
+  ctx.fillStyle = 'rgba(255, 184, 77, 0.75)';
+  ctx.fillRect(x + gunW * 0.55, y + 32, gunW * 0.12, 18);
+  ctx.restore();
+}
+
+function drawCrosshair() {
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2;
+  const spread = 8 + state.crosshairSpread * 16;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(232, 242, 255, 0.95)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(cx - spread - 9, cy);
+  ctx.lineTo(cx - spread - 3, cy);
+  ctx.moveTo(cx + spread + 3, cy);
+  ctx.lineTo(cx + spread + 9, cy);
+  ctx.moveTo(cx, cy - spread - 9);
+  ctx.lineTo(cx, cy - spread - 3);
+  ctx.moveTo(cx, cy + spread + 3);
+  ctx.lineTo(cx, cy + spread + 9);
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
+  ctx.beginPath();
+  ctx.arc(cx, cy, 2.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function rayStep(startX, startY, angle, maxDistance) {
+  const step = 6;
+  const dir = vectorFromAngle(angle);
+  let distance = 0;
+  let x = startX;
+  let y = startY;
+
+  while (distance < maxDistance) {
+    x += dir.x * step;
+    y += dir.y * step;
+    distance += step;
+    if (pointBlocked(x, y, 4)) {
+      return { distance, x, y, hit: true };
+    }
+  }
+
+  return { distance: maxDistance, x, y, hit: false };
+}
+
+function canSee(camera, target) {
+  return !lineBlocked(camera, target);
 }
 
 function cellFromPos(x, y) {
@@ -461,6 +598,8 @@ function syncHud() {
   allyAlive.textContent = String(state.units.filter((unit) => unit.team === 'ally' && !unit.dead).length);
   enemyAlive.textContent = String(state.units.filter((unit) => unit.team === 'enemy' && !unit.dead).length);
   plantLabel.textContent = state.planted ? `${state.planted.team === 'ally' ? 'Allies' : 'Enemies'} planted` : state.carryDrop ? 'Dropped' : 'Idle';
+  startButton.textContent = state.phase === 'lobby' ? 'Launch Match' : state.phase === 'buy' ? 'Start Round' : state.phase === 'roundEnd' || state.phase === 'matchEnd' ? 'Replay' : 'In Round';
+  startButton.disabled = state.phase === 'round';
   renderLoadout();
   renderRoster();
   renderWeapons();
@@ -612,13 +751,18 @@ function startBuyPhase() {
   state.attackTeam = state.round % 2 === 1 ? 'ally' : 'enemy';
   state.attackSite = state.round % 2 === 1 ? 'A' : 'B';
   state.objective = `${state.attackTeam === 'ally' ? 'Allies attack' : 'Enemies attack'} site ${state.attackSite}`;
+  if (document.pointerLockElement === canvas) {
+    document.exitPointerLock();
+  }
   resetRoundUnits();
+  if (state.playerUnit) {
+    const target = getSiteTarget(state.playerUnit);
+    state.cameraAngle = Math.atan2(target.y - state.playerUnit.y, target.x - state.playerUnit.x);
+  }
+  state.cameraBob = 0;
+  state.crosshairSpread = 0;
   syncHud();
-  showOverlay(
-    `Round ${state.round}: Buy Phase`,
-    `${state.attackTeam === 'ally' ? 'Your squad attacks' : 'Your squad defends'} this round. Spend credits, swap weapons, and then launch the round.`,
-    'Start Round'
-  );
+  hideOverlay();
   logMessage(`Round ${state.round} setup: ${state.attackTeam === 'ally' ? 'attack' : 'defend'} on site ${state.attackSite}.`, 'amber');
 }
 
@@ -627,6 +771,9 @@ function startRound() {
   state.phase = 'round';
   state.roundTimer = 90;
   state.objective = state.planted ? 'Defuse or hold' : 'Plant or hold';
+  if (!document.pointerLockElement) {
+    canvas.requestPointerLock().catch(() => {});
+  }
   syncHud();
   logMessage(`Round ${state.round} live.`, 'cyan');
 }
@@ -911,8 +1058,7 @@ function useAbility(unit) {
     return;
   }
 
-  const aim = { x: state.pointer.x, y: state.pointer.y };
-  const aimAngle = Math.atan2(aim.y - unit.y, aim.x - unit.x);
+  const aimAngle = getAimAngle(unit);
   const forward = { x: Math.cos(aimAngle), y: Math.sin(aimAngle) };
 
   if (unit.agentKey === 'iron') {
@@ -978,9 +1124,8 @@ function useUltimate(unit) {
   }
 
   if (unit.agentKey === 'web') {
-    const aim = { x: state.pointer.x, y: state.pointer.y };
-    const distance = Math.min(220, dist(unit, aim));
-    const angle = Math.atan2(aim.y - unit.y, aim.x - unit.x);
+    const angle = getAimAngle(unit);
+    const distance = 220;
     unit.x = clamp(unit.x + Math.cos(angle) * distance, unit.r + 2, MAP_W - unit.r - 2);
     unit.y = clamp(unit.y + Math.sin(angle) * distance, unit.r + 2, MAP_H - unit.r - 2);
     for (const other of state.units) {
@@ -1095,20 +1240,36 @@ function playerLogic(dt) {
     return;
   }
 
-  let mx = 0;
-  let my = 0;
-  if (state.keys.has('KeyW') || state.keys.has('ArrowUp')) my -= 1;
-  if (state.keys.has('KeyS') || state.keys.has('ArrowDown')) my += 1;
-  if (state.keys.has('KeyA') || state.keys.has('ArrowLeft')) mx -= 1;
-  if (state.keys.has('KeyD') || state.keys.has('ArrowRight')) mx += 1;
+  const forward = vectorFromAngle(state.cameraAngle);
+  const right = { x: -forward.y, y: forward.x };
+  let moveX = 0;
+  let moveY = 0;
+  if (state.keys.has('KeyW') || state.keys.has('ArrowUp')) {
+    moveX += forward.x;
+    moveY += forward.y;
+  }
+  if (state.keys.has('KeyS') || state.keys.has('ArrowDown')) {
+    moveX -= forward.x;
+    moveY -= forward.y;
+  }
+  if (state.keys.has('KeyD') || state.keys.has('ArrowRight')) {
+    moveX += right.x;
+    moveY += right.y;
+  }
+  if (state.keys.has('KeyA') || state.keys.has('ArrowLeft')) {
+    moveX -= right.x;
+    moveY -= right.y;
+  }
 
-  const length = Math.hypot(mx, my) || 1;
-  unit.moveIntent = state.phase === 'round' || state.phase === 'buy' ? { x: mx / length, y: my / length } : { x: 0, y: 0 };
-  unit.facing = Math.atan2(state.pointer.y - unit.y, state.pointer.x - unit.x);
+  const length = Math.hypot(moveX, moveY) || 1;
+  unit.moveIntent = state.phase === 'round' || state.phase === 'buy' ? { x: moveX / length, y: moveY / length } : { x: 0, y: 0 };
+  unit.facing = state.cameraAngle;
+  state.cameraBob = clamp(state.cameraBob + length * dt * 2.8, 0, 1);
 
   if (state.phase === 'round') {
-    const enemy = nearestEnemy(unit);
-    if (state.fireHeld && enemy && dist(unit, enemy) < unit.weapon.range && !lineBlocked(unit, enemy)) {
+    const enemy = getPlayerCrosshairTarget();
+    state.crosshairSpread = clamp(state.crosshairSpread + (state.fireHeld ? 0.03 : -0.02), 0, 1);
+    if (state.fireHeld && enemy) {
       attemptShoot(unit, enemy);
     }
 
@@ -1131,6 +1292,8 @@ function playerLogic(dt) {
         defuseArtifact();
       }
     }
+  } else {
+    state.crosshairSpread = clamp(state.crosshairSpread - 0.03, 0, 1);
   }
 }
 
@@ -1318,185 +1481,163 @@ function updateState(dt) {
   updateEffects(dt);
   updateRoundTimers(dt);
 
-  if (state.phase === 'round') {
-    if (state.playerUnit && state.keys.has('KeyQ')) {
-      if (!state.playerUnit.qDown) {
-        useAbility(state.playerUnit);
-      }
-      state.playerUnit.qDown = true;
-    } else if (state.playerUnit) {
-      state.playerUnit.qDown = false;
-    }
-
-    if (state.playerUnit && state.keys.has('KeyR')) {
-      if (!state.playerUnit.rDown) {
-        useUltimate(state.playerUnit);
-      }
-      state.playerUnit.rDown = true;
-    } else if (state.playerUnit) {
-      state.playerUnit.rDown = false;
-    }
-  }
-
   syncHud();
 }
 
 function drawArena() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  const bg = ctx.createLinearGradient(0, 0, 0, canvas.height);
-  bg.addColorStop(0, '#0c1a2d');
-  bg.addColorStop(1, '#08111b');
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const camera = getCameraPosition();
+  const cameraAngle = state.cameraAngle;
+  const fov = Math.PI / 3;
+
+  const sky = ctx.createLinearGradient(0, 0, 0, canvas.height * 0.58);
+  sky.addColorStop(0, '#101f34');
+  sky.addColorStop(0.55, '#0a1523');
+  sky.addColorStop(1, '#060b12');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, canvas.width, canvas.height * 0.58);
+
+  const floor = ctx.createLinearGradient(0, canvas.height * 0.58, 0, canvas.height);
+  floor.addColorStop(0, '#0b1524');
+  floor.addColorStop(1, '#04070c');
+  ctx.fillStyle = floor;
+  ctx.fillRect(0, canvas.height * 0.58, canvas.width, canvas.height * 0.42);
 
   const siteA = sites.A;
   const siteB = sites.B;
+  const objectives = [
+    { x: siteA.x + siteA.w / 2, y: siteA.y + siteA.h / 2, color: 'rgba(75, 228, 255, 0.75)', radius: 9 },
+    { x: siteB.x + siteB.w / 2, y: siteB.y + siteB.h / 2, color: 'rgba(255, 99, 127, 0.75)', radius: 9 }
+  ];
 
-  ctx.save();
-  ctx.fillStyle = 'rgba(75, 228, 255, 0.08)';
-  ctx.fillRect(siteA.x * TILE, siteA.y * TILE, siteA.w * TILE, siteA.h * TILE);
-  ctx.fillStyle = 'rgba(255, 99, 127, 0.08)';
-  ctx.fillRect(siteB.x * TILE, siteB.y * TILE, siteB.w * TILE, siteB.h * TILE);
-  ctx.restore();
-
-  for (let row = 0; row < HEIGHT; row += 1) {
-    for (let col = 0; col < WIDTH; col += 1) {
-      const x = col * TILE;
-      const y = row * TILE;
-      if (grid[row][col] === '#') {
-        const shade = 26 + ((col + row) % 3) * 6;
-        ctx.fillStyle = `rgb(${shade}, ${shade + 4}, ${shade + 14})`;
-        ctx.fillRect(x, y, TILE, TILE);
-        ctx.strokeStyle = 'rgba(255,255,255,0.04)';
-        ctx.strokeRect(x + 0.5, y + 0.5, TILE - 1, TILE - 1);
-      } else {
-        ctx.fillStyle = (col + row) % 2 === 0 ? '#0b1524' : '#0a1321';
-        ctx.fillRect(x, y, TILE, TILE);
-      }
-    }
+  const wallColumns = Math.min(320, canvas.width);
+  for (let column = 0; column < wallColumns; column += 1) {
+    const screenX = (column / wallColumns) * canvas.width;
+    const rayAngle = normalizeAngle(cameraAngle - fov / 2 + (column / wallColumns) * fov);
+    const ray = rayStep(camera.x, camera.y, rayAngle, 1200);
+    const corrected = ray.distance * Math.cos(angleDiff(rayAngle, cameraAngle));
+    const wallHeight = clamp((TILE * 390) / Math.max(24, corrected), 8, canvas.height * 1.28);
+    const top = canvas.height / 2 - wallHeight / 2;
+    const shade = clamp(210 - corrected * 0.16, 30, 210);
+    const fog = clamp(1 - corrected / 1000, 0.12, 1);
+    ctx.fillStyle = `rgba(${Math.round(shade)}, ${Math.round(shade * 0.95)}, ${Math.round(shade * 1.12)}, ${fog})`;
+    ctx.fillRect(screenX, top, canvas.width / wallColumns + 1.2, wallHeight);
   }
 
-  for (const effect of state.effects) {
-    if (effect.type === 'screen') {
-      ctx.save();
-      ctx.fillStyle = 'rgba(75, 228, 255, 0.28)';
-      ctx.strokeStyle = 'rgba(75, 228, 255, 0.9)';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.roundRect(effect.x, effect.y, effect.w, effect.h, 10);
-      ctx.fill();
-      ctx.stroke();
-      ctx.restore();
-    }
+  const billboards = [];
+  for (const unit of state.units) {
+    if (unit.dead) continue;
+    const proj = projectPoint(unit, camera.x, camera.y, cameraAngle, fov, canvas.width, canvas.height);
+    if (!proj) continue;
+    billboards.push({ type: 'unit', unit, proj });
   }
 
-  for (const trap of state.traps) {
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(trap.x, trap.y, trap.radius, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(125, 255, 186, 0.14)';
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(125, 255, 186, 0.8)';
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  if (state.carryDrop) {
-    ctx.save();
-    ctx.fillStyle = 'rgba(255, 184, 77, 0.75)';
-    ctx.beginPath();
-    ctx.arc(state.carryDrop.x, state.carryDrop.y, 10, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
+  for (const marker of objectives) {
+    billboards.push({ type: 'objective', marker, proj: projectPoint(marker, camera.x, camera.y, cameraAngle, fov, canvas.width, canvas.height) });
   }
 
   if (state.planted) {
-    ctx.save();
-    ctx.fillStyle = state.planted.team === 'ally' ? 'rgba(75, 228, 255, 0.95)' : 'rgba(255, 99, 127, 0.95)';
-    ctx.beginPath();
-    ctx.arc(state.planted.x, state.planted.y, 14 + Math.sin(state.planted.pulse * 6) * 2, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = '#fff';
-    ctx.globalAlpha = 0.55;
-    ctx.stroke();
-    ctx.restore();
+    billboards.push({ type: 'planted', marker: { x: state.planted.x / TILE, y: state.planted.y / TILE }, proj: projectPoint({ x: state.planted.x, y: state.planted.y }, camera.x, camera.y, cameraAngle, fov, canvas.width, canvas.height) });
   }
 
-  for (const projectile of state.bullets) {
-    ctx.save();
-    ctx.strokeStyle = projectile.team === 'ally' ? 'rgba(75, 228, 255, 0.95)' : 'rgba(255, 99, 127, 0.95)';
-    ctx.lineWidth = 4;
-    ctx.beginPath();
-    ctx.moveTo(projectile.x, projectile.y);
-    ctx.lineTo(projectile.x - projectile.vx * 0.018, projectile.y - projectile.vy * 0.018);
-    ctx.stroke();
-    ctx.restore();
+  if (state.carryDrop) {
+    billboards.push({ type: 'drop', marker: { x: state.carryDrop.x, y: state.carryDrop.y }, proj: projectPoint({ x: state.carryDrop.x, y: state.carryDrop.y }, camera.x, camera.y, cameraAngle, fov, canvas.width, canvas.height) });
   }
 
-  for (const unit of state.units) {
-    if (unit.dead) {
+  billboards.sort((a, b) => (b.proj?.distance ?? 0) - (a.proj?.distance ?? 0));
+
+  for (const item of billboards) {
+    const proj = item.proj;
+    if (!proj) continue;
+    const x = proj.x;
+    const size = item.type === 'objective' ? 18 : item.type === 'drop' ? 18 : Math.min(canvas.height * 1.2, proj.size * 1.35);
+    const top = canvas.height / 2 - size * 0.95;
+    if (x < -80 || x > canvas.width + 80) continue;
+
+    if (item.type === 'unit') {
+      const unit = item.unit;
+      const visible = canSee(camera, unit);
       ctx.save();
-      ctx.globalAlpha = 0.2;
-      ctx.fillStyle = unit.team === 'ally' ? TEAM_COLORS.ally : TEAM_COLORS.enemy;
+      ctx.globalAlpha = visible ? 1 : 0.45;
+      ctx.fillStyle = unit.team === 'ally' ? 'rgba(75, 228, 255, 0.94)' : 'rgba(255, 99, 127, 0.94)';
+      ctx.shadowColor = ctx.fillStyle;
+      ctx.shadowBlur = 18;
       ctx.beginPath();
-      ctx.arc(unit.x, unit.y, unit.r, 0, Math.PI * 2);
+      ctx.roundRect(x - size * 0.23, top, size * 0.46, size * 1.35, 8);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(7, 17, 29, 0.72)';
+      ctx.beginPath();
+      ctx.roundRect(x - size * 0.15, top + size * 0.22, size * 0.3, size * 0.45, 7);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = '#eaf5ff';
+      ctx.font = 'bold 12px Bahnschrift, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(unit.name.split(' ')[0], x, top + size * 1.52);
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      ctx.fillRect(x - size * 0.25, top - 12, size * 0.5, 4);
+      ctx.fillStyle = '#3cff8a';
+      ctx.fillRect(x - size * 0.25, top - 12, size * 0.5 * (unit.hp / unit.maxHp), 4);
+      ctx.restore();
+      continue;
+    }
+
+    if (item.type === 'planted') {
+      ctx.save();
+      ctx.fillStyle = 'rgba(255, 214, 98, 0.95)';
+      ctx.beginPath();
+      ctx.arc(x, top + size * 0.72, 11 + Math.sin(performance.now() / 180) * 2, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
       continue;
     }
 
-    ctx.save();
-    ctx.shadowColor = unit.team === 'ally' ? TEAM_COLORS.ally : TEAM_COLORS.enemy;
-    ctx.shadowBlur = 16;
-    ctx.fillStyle = unit.flash > 0 ? '#fff' : unit.color;
-    ctx.beginPath();
-    ctx.arc(unit.x, unit.y, unit.r, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.fillStyle = 'rgba(7, 17, 29, 0.55)';
-    ctx.beginPath();
-    ctx.arc(unit.x, unit.y, unit.r - 5, 0, Math.PI * 2);
-    ctx.fill();
-
-    if (unit.carrying) {
-      ctx.fillStyle = '#ffd26a';
+    if (item.type === 'drop') {
+      ctx.save();
+      ctx.fillStyle = 'rgba(255, 184, 77, 0.9)';
       ctx.beginPath();
-      ctx.arc(unit.x + unit.r - 2, unit.y - unit.r + 2, 5, 0, Math.PI * 2);
+      ctx.arc(x, top + size * 0.75, 9, 0, Math.PI * 2);
       ctx.fill();
+      ctx.restore();
+      continue;
     }
 
-    if (unit.stealth > 0) {
-      ctx.globalAlpha = 0.5;
+    if (item.type === 'objective') {
+      ctx.save();
+      ctx.fillStyle = item.marker.color;
+      ctx.beginPath();
+      ctx.arc(x, top + size, item.marker.radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
     }
+  }
 
+  for (const projectile of state.bullets) {
+    ctx.save();
+    const proj = projectPoint(projectile, camera.x, camera.y, cameraAngle, fov, canvas.width, canvas.height);
+    if (proj) {
+      ctx.strokeStyle = projectile.team === 'ally' ? 'rgba(75, 228, 255, 0.9)' : 'rgba(255, 99, 127, 0.9)';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(proj.x, canvas.height / 2);
+      ctx.lineTo(proj.x, canvas.height / 2 - 10);
+      ctx.stroke();
+    }
     ctx.restore();
-
-    const barW = 34;
-    const hpPct = unit.hp / unit.maxHp;
-    const armorPct = unit.armor / Math.max(1, unit.maxArmor);
-    ctx.fillStyle = 'rgba(0,0,0,0.45)';
-    ctx.fillRect(unit.x - barW / 2, unit.y - unit.r - 16, barW, 6);
-    ctx.fillStyle = '#3cff8a';
-    ctx.fillRect(unit.x - barW / 2, unit.y - unit.r - 16, barW * hpPct, 6);
-    if (unit.armor > 0) {
-      ctx.fillStyle = 'rgba(75, 228, 255, 0.9)';
-      ctx.fillRect(unit.x - barW / 2, unit.y - unit.r - 10, barW * armorPct, 3);
-    }
-
-    ctx.fillStyle = '#eef7ff';
-    ctx.font = '11px Bahnschrift, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(unit.name.split(' ')[0], unit.x, unit.y + unit.r + 13);
   }
 
   if (state.phase === 'round') {
     ctx.save();
-    ctx.fillStyle = 'rgba(255,255,255,0.06)';
-    ctx.fillRect(0, 0, canvas.width, 46);
+    ctx.fillStyle = 'rgba(0,0,0,0.42)';
+    ctx.fillRect(18, 16, 325, 52);
     ctx.fillStyle = '#e8f2ff';
     ctx.font = 'bold 15px Bahnschrift, sans-serif';
-    ctx.fillText(`Round ${state.round} | ${state.attackTeam === 'ally' ? 'Allies' : 'Enemies'} attacking site ${state.attackSite}`, 28, 29);
+    ctx.textAlign = 'left';
+    ctx.fillText(`Round ${state.round} | ${state.attackTeam === 'ally' ? 'Allies' : 'Enemies'} attacking site ${state.attackSite}`, 28, 36);
+    ctx.fillStyle = 'rgba(234, 245, 255, 0.78)';
+    ctx.font = '12px Bahnschrift, sans-serif';
+    ctx.fillText('Mouse look · Click to lock · WASD move · E interact', 28, 55);
     ctx.restore();
   }
 
@@ -1510,6 +1651,9 @@ function drawArena() {
     ctx.fillText(`Detonation ${warn.toFixed(1)}s`, canvas.width - 176, 44);
     ctx.restore();
   }
+
+  drawWeaponOverlay();
+  drawCrosshair();
 }
 
 function loop(timestamp) {
@@ -1524,15 +1668,33 @@ function loop(timestamp) {
   requestAnimationFrame(loop);
 }
 
-canvas.addEventListener('pointermove', (event) => {
-  const rect = canvas.getBoundingClientRect();
-  state.pointer.x = (event.clientX - rect.left) * (canvas.width / rect.width);
-  state.pointer.y = (event.clientY - rect.top) * (canvas.height / rect.height);
+canvas.addEventListener('click', async () => {
+  if (state.phase === 'round' && !document.pointerLockElement) {
+    try {
+      await canvas.requestPointerLock();
+      state.mouseCaptured = true;
+    } catch {
+      state.mouseCaptured = false;
+    }
+  }
 });
 
-canvas.addEventListener('pointerdown', (event) => {
+document.addEventListener('pointerlockchange', () => {
+  state.mouseCaptured = document.pointerLockElement === canvas;
+});
+
+window.addEventListener('mousemove', (event) => {
+  if (state.mouseCaptured || (event.buttons === 1 && canvas.matches(':hover'))) {
+    state.cameraAngle = normalizeAngle(state.cameraAngle + event.movementX * 0.0028);
+  }
+});
+
+window.addEventListener('pointerdown', (event) => {
   if (event.button === 0) {
     state.fireHeld = true;
+    if (state.phase === 'round' && !document.pointerLockElement) {
+      canvas.requestPointerLock().catch(() => {});
+    }
   }
 });
 
@@ -1547,7 +1709,6 @@ window.addEventListener('keydown', (event) => {
     hideOverlay();
   }
   if ((event.code === 'Enter' || event.code === 'Space') && state.phase === 'buy') {
-    hideOverlay();
     startRound();
   }
   if (event.code === 'KeyQ' && state.phase === 'round' && state.playerUnit) {
@@ -1561,6 +1722,9 @@ window.addEventListener('keydown', (event) => {
       useUltimate(state.playerUnit);
     }
     state.playerUnit.rDown = true;
+  }
+  if (event.code === 'Escape' && document.pointerLockElement === canvas) {
+    document.exitPointerLock();
   }
 });
 
@@ -1620,8 +1784,29 @@ startButton.addEventListener('click', () => {
     beginMatch();
     hideOverlay();
   } else if (state.phase === 'buy') {
-    hideOverlay();
     startRound();
+  } else if (state.phase === 'matchEnd') {
+    state.phase = 'lobby';
+    state.round = 1;
+    state.matchFinished = false;
+    state.allyScore = 0;
+    state.enemyScore = 0;
+    state.credits = 800;
+    state.lossStreak = 0;
+    state.bullets = [];
+    state.effects = [];
+    state.traps = [];
+    state.planted = null;
+    state.carryDrop = null;
+    state.logs = [];
+    state.ownedWeapons = new Set(['v9', 'atlas']);
+    state.playerWeapon = 'atlas';
+    state.playerAgent = 'iron';
+    renderRoster();
+    renderWeapons();
+    renderLoadout();
+    syncHud();
+    showOverlay('Artifact Strike', 'Choose an agent, buy a weapon, and launch the first round. The enemy squad will alternate between attack and defense to simulate the round-based flow from the docs.', 'Enter Match');
   }
 });
 
